@@ -4,7 +4,7 @@
 -- Generated: 2026-10-21
 --
 -- Sample data to test the schema from jarvis-schema-setup.sql: 1 customer,
--- 2 cars, 15 price_list entries, and 4 repair records.
+-- 1 car, 15 price_list entries, and 0 repair records.
 -- Run this AFTER jarvis-schema-setup.sql has been run successfully.
 --
 -- Uses fixed UUIDs (instead of gen_random_uuid()) so the foreign keys below
@@ -17,7 +17,7 @@
 -- ----------------------------------------------------------------------------
 
 insert into customers (id, name, phone, email, created_at) values
-    ('a0000000-0000-4000-8000-000000000001', 'María Fernández Rojas',  '8888-1234', 'maria.fernandez@gmail.com', now() - interval '120 days')
+    ('a0000000-0000-4000-8000-000000000001', 'Kevin Martinez', '88937529', 'mkevin755@gmail.com', now())
 on conflict (id) do nothing;
 
 -- ----------------------------------------------------------------------------
@@ -25,8 +25,7 @@ on conflict (id) do nothing;
 -- ----------------------------------------------------------------------------
 
 insert into cars (id, customer_id, make, model, year, license_plate, created_at) values
-    ('b0000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000001', 'Toyota', 'Corolla', 2018, '456789', now() - interval '120 days'),
-    ('b0000000-0000-4000-8000-000000000002', 'a0000000-0000-4000-8000-000000000001', 'Honda',  'CR-V',    2020, '678901', now() - interval '100 days')
+    ('b0000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000001', 'MG', 'GS', 2017, 'FQM026', now())
 on conflict (id) do nothing;
 
 -- ----------------------------------------------------------------------------
@@ -69,19 +68,17 @@ on conflict (id) do nothing;
 -- ----------------------------------------------------------------------------
 -- REPAIRS
 -- ----------------------------------------------------------------------------
-
-insert into repairs (id, car_id, repair_date, work_performed, cost, mileage, notes, created_at) values
-    ('d0000000-0000-4000-8000-000000000001', 'b0000000-0000-4000-8000-000000000001', current_date - interval '110 days', 'Cambio de aceite',               8000, 68000, null,                                 now() - interval '110 days'),
-    ('d0000000-0000-4000-8000-000000000002', 'b0000000-0000-4000-8000-000000000001', current_date - interval '45 days',  'Cambio de pastillas',           15000, 72500, 'Cliente reportó chillido al frenar', now() - interval '45 days'),
-    ('d0000000-0000-4000-8000-000000000003', 'b0000000-0000-4000-8000-000000000002', current_date - interval '90 days',  'Revisión general',              25000, 34000, null,                                 now() - interval '90 days'),
-    ('d0000000-0000-4000-8000-000000000004', 'b0000000-0000-4000-8000-000000000002', current_date - interval '15 days',  'Cambio de coolant',             25000, 38200, null,                                 now() - interval '15 days')
-on conflict (id) do nothing;
+-- No sample repairs for now — the previous sample rows belonged to the
+-- fictional customer/cars that were removed. Insert real repair records
+-- for Kevin's MG GS (car_id 'b0000000-0000-4000-8000-000000000001') as they
+-- happen, following the insert flow discussed earlier (repairs.cost = what
+-- was charged, then a matching row in expenses if there was a real cost).
 
 -- ============================================================================
 -- End of seed data.
 -- Quick sanity checks after running:
 --   select count(*) from customers;   -- expect 1
---   select count(*) from cars;        -- expect 2
+--   select count(*) from cars;        -- expect 1
 --   select count(*) from price_list;  -- expect 15
---   select count(*) from repairs;     -- expect 4
+--   select count(*) from repairs;     -- expect 0
 -- ============================================================================

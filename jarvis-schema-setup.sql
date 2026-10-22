@@ -58,11 +58,21 @@ create index if not exists idx_repairs_repair_date on repairs(repair_date);
 create table if not exists price_list (
     id              uuid primary key default gen_random_uuid(),
     job_name        text not null,
+    -- Fixed-price job: price holds the amount, price_max stays null.
+    -- Price-range job (e.g. "ajuste cable de freno de mano, 10.000 a 25.000"):
+    -- price holds the minimum, price_max the maximum.
     price           numeric(12,2) not null check (price >= 0),
+    price_max       numeric(12,2) check (price_max >= price),
     category        text check (category in ('recurring', 'new')),
     notes           text,
     updated_at      timestamptz not null default now()
 );
+
+-- Idempotent add for installs that already ran this script before
+-- price_max existed — no-op if the column is already there.
+alter table price_list add column if not exists price_max numeric(12,2);
+alter table price_list drop constraint if exists price_list_price_max_check;
+alter table price_list add constraint price_list_price_max_check check (price_max >= price);
 
 create table if not exists expenses (
     id              uuid primary key default gen_random_uuid(),

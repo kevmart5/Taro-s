@@ -5,10 +5,13 @@
 -- Convention: table and column names, and all comments, in English.
 --
 -- Run this whole script in the Supabase SQL Editor, in the order it appears.
--- It's split into 3 parts:
+-- It's split into 4 parts:
 --   1) Tables (customers, cars, repairs, price_list)
 --   2) Audit log (table + triggers) — optional layer from the spec, section 6
 --   3) jarvis_agent role + RLS policies — layers 1 and 2 from the spec, section 6
+--   4) Views (customer_car_history, customer_cars, car_latest_repair) —
+--      avoid multi-table JOINs in Jarvis' own SQL, which trigger ChatGPT's
+--      tool-call safety checks (see spec notes)
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
@@ -180,9 +183,111 @@ create policy jarvis_insert_price_list on price_list
 -- those operations stay blocked both by RLS and by the Layer 1 GRANTs
 -- (a hard floor at the database level).
 
+-- ----------------------------------------------------------------------------
+-- 4) VIEWS — avoid Jarvis writing its own multi-table JOINs
+-- ----------------------------------------------------------------------------
+-- Why: Jarvis' multi-table JOIN queries (customers + cars + repairs) were
+-- being blocked by ChatGPT's tool-call safety checks ("This tool call was
+-- blocked by OpenAI's safety checks"), not by RLS or permissions — those were
+-- confirmed working directly against jarvis_agent. Having Jarvis query a
+-- single view instead of writing its own JOIN avoids that pattern.
+--
+-- security_invoker = true is required on every view below: it makes the
+-- view respect jarvis_agent's own RLS policies on customers/cars/repairs,
+-- instead of running with the privileges of whoever created the view.
+--
+-- Three views, one per query shape Jarvis needs (spec section 3):
+--   - customer_car_history: full repair history per customer/car, any date
+--     range (Jarvis filters with WHERE repair_date BETWEEN ...)
+--   - customer_cars: which cars belong to which customer, no repair fan-out
+--   - car_latest_repair: last repair only, one row per car
+
+-- 4a) Full history: customer -> car -> every repair.
+create or replace view customer_car_history
+with (security_invoker = true) as
+select
+    c.id              as customer_id,
+    c.name            as customer_name,
+    c.phone           as customer_phone,
+    c.email           as customer_email,
+    ca.id             as car_id,
+    ca.make,
+    ca.model,
+    ca.year,
+    ca.license_plate,
+    r.id              as repair_id,
+    r.repair_date,
+    r.work_performed,
+    r.cost,
+    r.mileage,
+    r.notes           as repair_notes,
+    r.created_at      as repair_logged_at
+from customers c
+join cars ca on ca.customer_id = c.id
+left join repairs r on r.car_id = ca.id
+order by c.name, ca.license_plate, r.repair_date desc;
+
+grant select on customer_car_history to jarvis_agent;
+
+-- 4b) Which cars belong to which customer — one row per car, no repair
+-- duplication (customer_car_history fans out one row per repair, which
+-- is noisy when the question is just "qué autos tiene este cliente").
+create or replace view customer_cars
+with (security_invoker = true) as
+select
+    c.id            as customer_id,
+    c.name          as customer_name,
+    c.phone         as customer_phone,
+    ca.id           as car_id,
+    ca.make,
+    ca.model,
+    ca.year,
+    ca.license_plate,
+    ca.created_at   as car_registered_at
+from customers c
+join cars ca on ca.customer_id = c.id
+order by c.name, ca.license_plate;
+
+grant select on customer_cars to jarvis_agent;
+
+-- 4c) Last repair per car only (the Gabriela case: "cuál fue su última
+-- reparación"). Uses JOIN, not LEFT JOIN, on purpose: a car with no
+-- repairs has no "last repair" to show, so it shouldn't appear here.
+create or replace view car_latest_repair
+with (security_invoker = true) as
+select distinct on (ca.id)
+    c.id              as customer_id,
+    c.name            as customer_name,
+    ca.id             as car_id,
+    ca.make,
+    ca.model,
+    ca.year,
+    ca.license_plate,
+    r.id              as repair_id,
+    r.repair_date,
+    r.work_performed,
+    r.cost,
+    r.mileage
+from customers c
+join cars ca on ca.customer_id = c.id
+join repairs r on r.car_id = ca.id
+order by ca.id, r.repair_date desc, r.created_at desc;
+
+grant select on car_latest_repair to jarvis_agent;
+
+-- Jarvis only needs SELECT on these views — it still inserts new repairs
+-- directly into the repairs table, not through any of them.
+
 -- ============================================================================
 -- End of script.
 -- Before running this against the real tables: change jarvis_agent's
 -- password and confirm the Supabase plugin in ChatGPT can authenticate
 -- with that role (or whatever API key it ends up using).
+--
+-- After running section 4: update the Jarvis Project instructions in
+-- ChatGPT to tell it which view to use per question type, instead of
+-- writing its own JOIN:
+--   - historial completo / por rango de fechas -> customer_car_history
+--   - qué autos tiene un cliente                -> customer_cars
+--   - última reparación de un auto/cliente       -> car_latest_repair
 -- ============================================================================

@@ -5,13 +5,14 @@
 -- Convention: table and column names, and all comments, in English.
 --
 -- Run this whole script in the Supabase SQL Editor, in the order it appears.
--- It's split into 4 parts:
---   1) Tables (customers, cars, repairs, price_list)
+-- It's split into 5 parts:
+--   1) Tables (customers, cars, repairs, price_list, expenses)
 --   2) Audit log (table + triggers) — optional layer from the spec, section 6
 --   3) jarvis_agent role + RLS policies — layers 1 and 2 from the spec, section 6
 --   4) Views (customer_car_history, customer_cars, car_latest_repair) —
 --      avoid multi-table JOINs in Jarvis' own SQL, which trigger ChatGPT's
 --      tool-call safety checks (see spec notes)
+--   5) monthly_profit view — revenue (repairs.cost) vs expenses by month
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
@@ -62,6 +63,22 @@ create table if not exists price_list (
     notes           text,
     updated_at      timestamptz not null default now()
 );
+
+create table if not exists expenses (
+    id              uuid primary key default gen_random_uuid(),
+    -- Optional link: parts/labor tied to a specific repair use repair_id;
+    -- operational expenses (rent, utilities, etc.) leave it null.
+    repair_id       uuid references repairs(id) on delete set null,
+    expense_date    date not null default current_date,
+    category        text not null check (category in ('repuestos', 'mano_obra', 'operativo', 'otro')),
+    description     text not null,
+    amount          numeric(12,2) not null check (amount >= 0),
+    notes           text,
+    created_at      timestamptz not null default now()
+);
+
+create index if not exists idx_expenses_repair_id on expenses(repair_id);
+create index if not exists idx_expenses_expense_date on expenses(expense_date);
 
 -- Keeps updated_at current on every UPDATE (only relevant if a more
 -- privileged role gets UPDATE in the future; jarvis_agent won't have it).
@@ -119,6 +136,11 @@ create trigger trg_audit_price_list
     after insert on price_list
     for each row execute function log_jarvis_audit();
 
+drop trigger if exists trg_audit_expenses on expenses;
+create trigger trg_audit_expenses
+    after insert on expenses
+    for each row execute function log_jarvis_audit();
+
 -- ----------------------------------------------------------------------------
 -- 3) DEDICATED ROLE + ROW LEVEL SECURITY (layers 1 and 2, spec section 6)
 -- ----------------------------------------------------------------------------
@@ -135,17 +157,18 @@ begin
 end
 $$;
 
-grant select, insert on customers, cars, repairs, price_list to jarvis_agent;
+grant select, insert on customers, cars, repairs, price_list, expenses to jarvis_agent;
 -- Note: jarvis_agent gets NO permissions on jarvis_audit_log — that table is
 -- for internal traceability only, not for the agent to read or write.
 
--- Layer 2: RLS enabled on the 4 operational tables.
+-- Layer 2: RLS enabled on the 5 operational tables.
 alter table customers enable row level security;
 alter table cars enable row level security;
 alter table repairs enable row level security;
 alter table price_list enable row level security;
+alter table expenses enable row level security;
 
--- Open SELECT for jarvis_agent on all 4 tables.
+-- Open SELECT for jarvis_agent on all 5 tables.
 drop policy if exists jarvis_select_customers on customers;
 create policy jarvis_select_customers on customers
     for select to jarvis_agent using (true);
@@ -162,7 +185,11 @@ drop policy if exists jarvis_select_price_list on price_list;
 create policy jarvis_select_price_list on price_list
     for select to jarvis_agent using (true);
 
--- Open INSERT for jarvis_agent on all 4 tables.
+drop policy if exists jarvis_select_expenses on expenses;
+create policy jarvis_select_expenses on expenses
+    for select to jarvis_agent using (true);
+
+-- Open INSERT for jarvis_agent on all 5 tables.
 drop policy if exists jarvis_insert_customers on customers;
 create policy jarvis_insert_customers on customers
     for insert to jarvis_agent with check (true);
@@ -177,6 +204,10 @@ create policy jarvis_insert_repairs on repairs
 
 drop policy if exists jarvis_insert_price_list on price_list;
 create policy jarvis_insert_price_list on price_list
+    for insert to jarvis_agent with check (true);
+
+drop policy if exists jarvis_insert_expenses on expenses;
+create policy jarvis_insert_expenses on expenses
     for insert to jarvis_agent with check (true);
 
 -- No UPDATE/DELETE policies are created for jarvis_agent: since none exist,
@@ -278,16 +309,67 @@ grant select on car_latest_repair to jarvis_agent;
 -- Jarvis only needs SELECT on these views — it still inserts new repairs
 -- directly into the repairs table, not through any of them.
 
+-- ----------------------------------------------------------------------------
+-- 5) MONTHLY_PROFIT VIEW — revenue vs expenses by month
+-- ----------------------------------------------------------------------------
+-- Revenue comes from repairs.cost (what was charged), expenses from the new
+-- expenses table (parts, labor, operational costs — tied to a repair via
+-- repair_id or standalone). Aggregated separately by month and then combined
+-- with a FULL OUTER JOIN, so a month with expenses but no repairs (or vice
+-- versa) still shows up correctly instead of being dropped.
+create or replace view monthly_profit
+with (security_invoker = true) as
+with revenue as (
+    select
+        date_trunc('month', repair_date)::date as month,
+        sum(cost) as revenue
+    from repairs
+    group by 1
+),
+costs as (
+    select
+        date_trunc('month', expense_date)::date as month,
+        sum(amount) as expenses
+    from expenses
+    group by 1
+)
+select
+    coalesce(revenue.month, costs.month)       as month,
+    coalesce(revenue.revenue, 0)               as revenue,
+    coalesce(costs.expenses, 0)                as expenses,
+    coalesce(revenue.revenue, 0) - coalesce(costs.expenses, 0) as profit
+from revenue
+full outer join costs on revenue.month = costs.month
+order by month desc;
+
+grant select on monthly_profit to jarvis_agent;
+
+-- Optional companion breakdown: expenses by month and category, for when
+-- the question is "en qué se fue la plata" en vez de solo la ganancia neta.
+create or replace view monthly_expenses_by_category
+with (security_invoker = true) as
+select
+    date_trunc('month', expense_date)::date as month,
+    category,
+    sum(amount) as total
+from expenses
+group by 1, 2
+order by month desc, category;
+
+grant select on monthly_expenses_by_category to jarvis_agent;
+
 -- ============================================================================
 -- End of script.
 -- Before running this against the real tables: change jarvis_agent's
 -- password and confirm the Supabase plugin in ChatGPT can authenticate
 -- with that role (or whatever API key it ends up using).
 --
--- After running section 4: update the Jarvis Project instructions in
+-- After running sections 4 and 5: update the Jarvis Project instructions in
 -- ChatGPT to tell it which view to use per question type, instead of
--- writing its own JOIN:
---   - historial completo / por rango de fechas -> customer_car_history
---   - qué autos tiene un cliente                -> customer_cars
---   - última reparación de un auto/cliente       -> car_latest_repair
+-- writing its own JOIN or aggregation:
+--   - historial completo / por rango de fechas   -> customer_car_history
+--   - qué autos tiene un cliente                  -> customer_cars
+--   - última reparación de un auto/cliente        -> car_latest_repair
+--   - ganancia mensual / comparar meses            -> monthly_profit
+--   - en qué se fueron los gastos de un mes        -> monthly_expenses_by_category
 -- ============================================================================
